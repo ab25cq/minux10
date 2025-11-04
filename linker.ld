@@ -1,10 +1,9 @@
 ENTRY(_start)
 
 SECTIONS {
-  . = 0x40200000;
+  . = 0x80000;
 
   .vectors ALIGN(2048) : {
-    __vectors_start = .;
     KEEP(*(.vectors))
   }
   . = ALIGN(4);
@@ -19,6 +18,6 @@ SECTIONS {
   .bss : { *(.bss*) *(COMMON) }
 
   . = ALIGN(16);
-  __stack_top = . + 0x4000;   /* 16KB stack */
+  __stack_top = . + 0x4000;
 }
 
