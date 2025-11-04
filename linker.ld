@@ -1,23 +1,24 @@
 ENTRY(_start)
 
 SECTIONS {
-  . = 0x80000;
+  . = 0x40200000;
 
-  .text : ALIGN(2048) {
-    __vectors_start = .;      /* 2KB アラインの例外ベクタ */
+  .vectors ALIGN(2048) : {
+    __vectors_start = .;
     KEEP(*(.vectors))
-    . = ALIGN(4);
+  }
+  . = ALIGN(4);
+
+  .text : {
     *(.text.boot)
     *(.text*)
   }
 
   .rodata : { *(.rodata*) }
   .data   : { *(.data*) }
-  .bss : {
-    *(.bss*)
-    *(COMMON)
-  }
+  .bss : { *(.bss*) *(COMMON) }
 
   . = ALIGN(16);
-  __stack_top = . + 0x4000;   /* 16KB スタック */
+  __stack_top = . + 0x4000;   /* 16KB stack */
 }
+
