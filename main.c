@@ -1,110 +1,277 @@
 #include <stdint.h>
 #define MMIO32(a) (*(volatile uint32_t*)(a))
 
-/* --- Pi Zero 2 / Pi3 peripheral map --- */
-#define PERI_BASE   0x3F000000UL
+/* ===== Zero2 GPIO base: まずは 0x3F..., 出なければ 0xFE... に変更 ===== */
+#ifndef GPIO_BASE
+#define GPIO_BASE 0x3F200000UL
+/* #define GPIO_BASE 0xFE200000UL */
+#endif
 
-/* PL011 UART0 */
-#define UART_BASE   (PERI_BASE + 0x201000)
-#define UART_DR     (UART_BASE + 0x00)
-#define UART_FR     (UART_BASE + 0x18)
-#define UART_IBRD   (UART_BASE + 0x24)
-#define UART_FBRD   (UART_BASE + 0x28)
-#define UART_LCRH   (UART_BASE + 0x2C)
-#define UART_CR     (UART_BASE + 0x30)
-#define UART_IMSC   (UART_BASE + 0x38)
-#define UART_ICR    (UART_BASE + 0x44)
-#define FR_TXFF     (1u<<5)
-#define LCRH_FEN    (1u<<4)
-#define LCRH_WLEN8  (3u<<5)
-#define CR_UARTEN   (1u<<0)
-#define CR_TXE      (1u<<8)
-#define CR_RXE      (1u<<9)
+#define GPFSEL0 (GPIO_BASE+0x00)
+#define GPFSEL1 (GPIO_BASE+0x04)
+#define GPFSEL2 (GPIO_BASE+0x08)
+#define GPSET0  (GPIO_BASE+0x1C)
+#define GPCLR0  (GPIO_BASE+0x28)
+#define GPLEV0  (GPIO_BASE+0x34)
 
-/* GPIO（PL011用にGPIO14/15をALT0へ） */
-#define GPFSEL1     (PERI_BASE + 0x200004)
-#define GPPUD       (PERI_BASE + 0x200094)
-#define GPPUDCLK0   (PERI_BASE + 0x200098)
+/* ===== Waveshare 2.13" e-Paper HAT (B) 直挿しピン =====
+   MOSI: GPIO10, SCLK: GPIO11, CS:GPIO8, DC:GPIO25, RST:GPIO17, BUSY:GPIO24 */
+#define PIN_SCLK 11u   /* GPIO11 (Pin23) */
+#define PIN_MOSI 10u   /* GPIO10 (Pin19) */
+#define PIN_CS    8u   /* GPIO8  (Pin24) */
+#define PIN_DC   25u   /* GPIO25 (Pin22) */
+#define PIN_RST  17u   /* GPIO17 (Pin11) */
+#define PIN_BUSY 24u   /* GPIO24 (Pin18) */
 
-/* --- BCM2836 Local (QA7) --- */
-#define LOCAL_BASE               0x40000000UL
-#define CORE0_TIMER_IRQCNTL     (LOCAL_BASE + 0x40)
-#define CORE0_IRQ_SOURCE        (LOCAL_BASE + 0x60)
-/* ビット割り当て（広く使われる定義）
-   0:CNTPS, 1:CNTPNS, 2:CNTHP, 3:CNTV */
-#define QA7_IRQ_CNTPS   (1u<<0)
-#define QA7_IRQ_CNTPNS  (1u<<1)
-#define QA7_IRQ_CNTHP   (1u<<2)
-#define QA7_IRQ_CNTV    (1u<<3)
+/* ===== 画面サイズ ===== */
+#define EPD_W 250
+#define EPD_H 122
 
-/* ---- AArch64 Generic Timer: we'll use CNTPNS (非セキュア物理) ---- */
-static inline uint64_t cntfrq(void){ uint64_t v; __asm__("mrs %0,cntfrq_el0":"=r"(v)); return v; }
-static inline void cntp_tval(uint32_t v){ __asm__("msr cntp_tval_el0,%0"::"r"(v)); }
-static inline void cntp_enable(void){ __asm__("msr cntp_ctl_el0,%0"::"r"((uint64_t)1)); }
-static inline void cntp_disable(void){ __asm__("msr cntp_ctl_el0,%0"::"r"((uint64_t)0)); }
+/* ===== 1bpp フレームバッファ（白=1, 黒=0） ===== */
+static uint8_t fb[(EPD_W*EPD_H + 7)/8];
 
-static inline void isb(void){ __asm__ volatile("isb" ::: "memory"); }
-static inline void dsb(void){ __asm__ volatile("dsb sy" ::: "memory"); }
-static inline void enable_irq(void){ __asm__ volatile("msr daifclr,#2"); isb(); }
-static inline void delay_cycles(unsigned n){ while(n--){ __asm__ volatile("nop"); } }
+static inline void delay(unsigned n){ while(n--) __asm__ volatile("nop"); }
 
-/* ---- UART ---- */
-static void gpio_uart_alt0(void){
-  uint32_t v = MMIO32(GPFSEL1);
-  v &= ~((7u<<12)|(7u<<15));
-  v |=  (4u<<12) | (4u<<15);  /* GPIO14/15 → ALT0 (TXD0/RXD0) */
-  MMIO32(GPFSEL1)=v;
-
-  MMIO32(GPPUD)=0; delay_cycles(150);
-  MMIO32(GPPUDCLK0)=(1u<<14)|(1u<<15); delay_cycles(150);
-  MMIO32(GPPUDCLK0)=0;
+static void gpio_output(unsigned pin){
+  volatile uint32_t* sel=(volatile uint32_t*)(GPFSEL0+4*(pin/10));
+  unsigned sh=(pin%10)*3;
+  uint32_t v=*sel; v&=~(7u<<sh); v|=(1u<<sh);
+  *sel=v;
 }
-static void uart_init(void){
-  gpio_uart_alt0();
-  MMIO32(UART_CR)=0; dsb(); isb();
-  MMIO32(UART_IMSC)=0; MMIO32(UART_ICR)=0x7FF;
-  /* Pi実機のUARTCLKは通常48MHz想定（firmware依存）: 115200bps → 26/3 */
-  MMIO32(UART_IBRD)=26; MMIO32(UART_FBRD)=3;
-  MMIO32(UART_LCRH)=LCRH_WLEN8|LCRH_FEN;
-  MMIO32(UART_CR)=CR_UARTEN|CR_TXE|CR_RXE; dsb(); isb();
+static inline void gpio_set(unsigned p){ MMIO32(GPSET0+(p/32)*4)=(1u<<(p%32)); }
+static inline void gpio_clr(unsigned p){ MMIO32(GPCLR0+(p/32)*4)=(1u<<(p%32)); }
+static inline int  gpio_in (unsigned p){ return (MMIO32(GPLEV0)&(1u<<p))?1:0; }
+
+/* ===== ソフトSPI（MODE0） ===== */
+static inline void spi_bit(int b){
+  if(b) gpio_set(PIN_MOSI); else gpio_clr(PIN_MOSI);
+  gpio_set(PIN_SCLK); delay(6);
+  gpio_clr(PIN_SCLK); delay(6);
 }
-static void uart_putc(char c){ while(MMIO32(UART_FR)&FR_TXFF){} MMIO32(UART_DR)=(uint32_t)c; }
-static void uart_puts(const char*s){ while(*s){ if(*s=='\n') uart_putc('\r'); uart_putc(*s++);} }
-static void uart_put_dec(unsigned long long x){
-  char b[21]; int i=0; if(!x){uart_putc('0');return;}
-  while(x && i<20){ b[i++]='0'+(x%10); x/=10; }
-  while(i--) uart_putc(b[i]);
+static void spi_byte(uint8_t x){ for(int i=7;i>=0;--i) spi_bit((x>>i)&1); }
+static inline void epd_cmd (uint8_t c){ gpio_clr(PIN_DC); gpio_clr(PIN_CS); spi_byte(c); gpio_set(PIN_CS); }
+static inline void epd_data(uint8_t d){ gpio_set(PIN_DC); gpio_clr(PIN_CS); spi_byte(d); gpio_set(PIN_CS); }
+
+/* ===== BUSY待ち（このHATは BUSY=1 がreadyの実装が多い） ===== */
+static void wait_busy(void){
+  while(gpio_in(PIN_BUSY)==0) { delay(20000); }
 }
 
-/* ---- timer ---- */
-static volatile unsigned long long jiff=0;
-static uint32_t reload=0;
+/* ===== EPD 初期化（UC8151/SSD1680系の一般的シーケンス） ===== */
+static void epd_init(void){
+  gpio_output(PIN_SCLK); gpio_output(PIN_MOSI);
+  gpio_output(PIN_CS);   gpio_output(PIN_DC);
+  gpio_output(PIN_RST);
+  gpio_clr(PIN_CS); gpio_clr(PIN_SCLK); gpio_clr(PIN_MOSI);
 
-void irq_handler(void){
-  uint32_t src = MMIO32(CORE0_IRQ_SOURCE);
-  if(src & QA7_IRQ_CNTPNS){
-    cntp_tval(reload);
-    if((++jiff % 1)==0) { uart_puts("[tick]\n"); }
+  /* ハードリセット */
+  gpio_set(PIN_RST); delay(200000);
+  gpio_clr(PIN_RST); delay(200000);
+  gpio_set(PIN_RST); delay(200000);
+
+  wait_busy();
+
+  epd_cmd(0x12); /* SWRESET */
+  wait_busy();
+
+  /* Driver Output Control（高さ設定）。HAT(B)系では 0x0127 or 0x0122 が使われることが多い */
+  epd_cmd(0x01); epd_data(0x27); epd_data(0x01); epd_data(0x00);
+
+  epd_cmd(0x11); epd_data(0x01);             /* data entry mode: x+,y+ */
+  epd_cmd(0x44); epd_data(0x00); epd_data((EPD_W/8)-1); /* RAM x: 0..(W/8-1) */
+  epd_cmd(0x45); epd_data(0x00); epd_data(0x00);        /* RAM y start L,H */
+                  epd_data((EPD_H-1)&0xFF); epd_data((EPD_H-1)>>8); /* end */
+
+  epd_cmd(0x3C); epd_data(0x05);             /* border waveform */
+  epd_cmd(0x21); epd_data(0x00); epd_data(0x80); /* display update ctrl */
+
+  /* RAM x/y pos = 0 */
+  epd_cmd(0x4E); epd_data(0x00);
+  epd_cmd(0x4F); epd_data(0x00); epd_data(0x00);
+
+  wait_busy();
+}
+
+/* ===== フレームバッファ操作（白=1, 黒=0） ===== */
+static inline void fb_clear(uint8_t white){ /* white=1で全白 */
+  uint8_t v = white ? 0xFF : 0x00;
+  for(unsigned i=0;i<sizeof(fb);++i) fb[i]=v;
+}
+static inline void fb_setpix(int x,int y,int black){
+  if(x<0||x>=EPD_W||y<0||y>=EPD_H) return;
+  unsigned idx = (y*EPD_W + x);
+  unsigned byte = idx >> 3;
+  unsigned bit  = 7 - (idx & 7);
+  if(black) fb[byte] &= ~(1u<<bit); else fb[byte] |= (1u<<bit);
+}
+
+/* ===== 5x7 ASCII 等幅フォント（0x20〜0x7E） ===== */
+static const uint8_t font5x7[95][5] = {
+/* 0x20 ' ' */ {0x00,0x00,0x00,0x00,0x00},
+/* 0x21 '!' */ {0x00,0x00,0x5F,0x00,0x00},
+/* 0x22 '"' */ {0x00,0x07,0x00,0x07,0x00},
+/* 0x23 '#' */ {0x14,0x7F,0x14,0x7F,0x14},
+/* 0x24 '$' */ {0x24,0x2A,0x7F,0x2A,0x12},
+/* 0x25 '%' */ {0x23,0x13,0x08,0x64,0x62},
+/* 0x26 '&' */ {0x36,0x49,0x55,0x22,0x50},
+/* 0x27 '\''*/ {0x00,0x05,0x03,0x00,0x00},
+/* 0x28 '(' */ {0x00,0x1C,0x22,0x41,0x00},
+/* 0x29 ')' */ {0x00,0x41,0x22,0x1C,0x00},
+/* 0x2A '*' */ {0x14,0x08,0x3E,0x08,0x14},
+/* 0x2B '+' */ {0x08,0x08,0x3E,0x08,0x08},
+/* 0x2C ',' */ {0x00,0x50,0x30,0x00,0x00},
+/* 0x2D '-' */ {0x08,0x08,0x08,0x08,0x08},
+/* 0x2E '.' */ {0x00,0x60,0x60,0x00,0x00},
+/* 0x2F '/' */ {0x20,0x10,0x08,0x04,0x02},
+/* 0x30 '0' */ {0x3E,0x51,0x49,0x45,0x3E},
+/* 0x31 '1' */ {0x00,0x42,0x7F,0x40,0x00},
+/* 0x32 '2' */ {0x42,0x61,0x51,0x49,0x46},
+/* 0x33 '3' */ {0x21,0x41,0x45,0x4B,0x31},
+/* 0x34 '4' */ {0x18,0x14,0x12,0x7F,0x10},
+/* 0x35 '5' */ {0x27,0x45,0x45,0x45,0x39},
+/* 0x36 '6' */ {0x3C,0x4A,0x49,0x49,0x30},
+/* 0x37 '7' */ {0x01,0x71,0x09,0x05,0x03},
+/* 0x38 '8' */ {0x36,0x49,0x49,0x49,0x36},
+/* 0x39 '9' */ {0x06,0x49,0x49,0x29,0x1E},
+/* 0x3A ':' */ {0x00,0x36,0x36,0x00,0x00},
+/* 0x3B ';' */ {0x00,0x56,0x36,0x00,0x00},
+/* 0x3C '<' */ {0x08,0x14,0x22,0x41,0x00},
+/* 0x3D '=' */ {0x14,0x14,0x14,0x14,0x14},
+/* 0x3E '>' */ {0x00,0x41,0x22,0x14,0x08},
+/* 0x3F '?' */ {0x02,0x01,0x51,0x09,0x06},
+/* 0x40 '@' */ {0x32,0x49,0x79,0x41,0x3E},
+/* 0x41 'A' */ {0x7E,0x11,0x11,0x11,0x7E},
+/* 0x42 'B' */ {0x7F,0x49,0x49,0x49,0x36},
+/* 0x43 'C' */ {0x3E,0x41,0x41,0x41,0x22},
+/* 0x44 'D' */ {0x7F,0x41,0x41,0x22,0x1C},
+/* 0x45 'E' */ {0x7F,0x49,0x49,0x49,0x41},
+/* 0x46 'F' */ {0x7F,0x09,0x09,0x09,0x01},
+/* 0x47 'G' */ {0x3E,0x41,0x49,0x49,0x7A},
+/* 0x48 'H' */ {0x7F,0x08,0x08,0x08,0x7F},
+/* 0x49 'I' */ {0x00,0x41,0x7F,0x41,0x00},
+/* 0x4A 'J' */ {0x20,0x40,0x41,0x3F,0x01},
+/* 0x4B 'K' */ {0x7F,0x08,0x14,0x22,0x41},
+/* 0x4C 'L' */ {0x7F,0x40,0x40,0x40,0x40},
+/* 0x4D 'M' */ {0x7F,0x02,0x0C,0x02,0x7F},
+/* 0x4E 'N' */ {0x7F,0x04,0x08,0x10,0x7F},
+/* 0x4F 'O' */ {0x3E,0x41,0x41,0x41,0x3E},
+/* 0x50 'P' */ {0x7F,0x09,0x09,0x09,0x06},
+/* 0x51 'Q' */ {0x3E,0x41,0x51,0x21,0x5E},
+/* 0x52 'R' */ {0x7F,0x09,0x19,0x29,0x46},
+/* 0x53 'S' */ {0x46,0x49,0x49,0x49,0x31},
+/* 0x54 'T' */ {0x01,0x01,0x7F,0x01,0x01},
+/* 0x55 'U' */ {0x3F,0x40,0x40,0x40,0x3F},
+/* 0x56 'V' */ {0x1F,0x20,0x40,0x20,0x1F},
+/* 0x57 'W' */ {0x7F,0x20,0x18,0x20,0x7F},
+/* 0x58 'X' */ {0x63,0x14,0x08,0x14,0x63},
+/* 0x59 'Y' */ {0x07,0x08,0x70,0x08,0x07},
+/* 0x5A 'Z' */ {0x61,0x51,0x49,0x45,0x43},
+/* 0x5B '[' */ {0x00,0x7F,0x41,0x41,0x00},
+/* 0x5C '\\'*/ {0x02,0x04,0x08,0x10,0x20},
+/* 0x5D ']' */ {0x00,0x41,0x41,0x7F,0x00},
+/* 0x5E '^' */ {0x04,0x02,0x01,0x02,0x04},
+/* 0x5F '_' */ {0x80,0x80,0x80,0x80,0x80},
+/* 0x60 '`' */ {0x00,0x03,0x07,0x00,0x00},
+/* 0x61 'a' */ {0x20,0x54,0x54,0x54,0x78},
+/* 0x62 'b' */ {0x7F,0x48,0x44,0x44,0x38},
+/* 0x63 'c' */ {0x38,0x44,0x44,0x44,0x20},
+/* 0x64 'd' */ {0x38,0x44,0x44,0x48,0x7F},
+/* 0x65 'e' */ {0x38,0x54,0x54,0x54,0x18},
+/* 0x66 'f' */ {0x08,0x7E,0x09,0x01,0x02},
+/* 0x67 'g' */ {0x0C,0x52,0x52,0x52,0x3E},
+/* 0x68 'h' */ {0x7F,0x08,0x04,0x04,0x78},
+/* 0x69 'i' */ {0x00,0x44,0x7D,0x40,0x00},
+/* 0x6A 'j' */ {0x20,0x40,0x44,0x3D,0x00},
+/* 0x6B 'k' */ {0x7F,0x10,0x28,0x44,0x00},
+/* 0x6C 'l' */ {0x00,0x41,0x7F,0x40,0x00},
+/* 0x6D 'm' */ {0x7C,0x04,0x18,0x04,0x78},
+/* 0x6E 'n' */ {0x7C,0x08,0x04,0x04,0x78},
+/* 0x6F 'o' */ {0x38,0x44,0x44,0x44,0x38},
+/* 0x70 'p' */ {0x7C,0x14,0x14,0x14,0x08},
+/* 0x71 'q' */ {0x08,0x14,0x14,0x14,0x7C},
+/* 0x72 'r' */ {0x7C,0x08,0x04,0x04,0x08},
+/* 0x73 's' */ {0x48,0x54,0x54,0x54,0x20},
+/* 0x74 't' */ {0x04,0x3F,0x44,0x40,0x20},
+/* 0x75 'u' */ {0x3C,0x40,0x40,0x20,0x7C},
+/* 0x76 'v' */ {0x1C,0x20,0x40,0x20,0x1C},
+/* 0x77 'w' */ {0x3C,0x40,0x30,0x40,0x3C},
+/* 0x78 'x' */ {0x44,0x28,0x10,0x28,0x44},
+/* 0x79 'y' */ {0x0C,0x50,0x50,0x50,0x3C},
+/* 0x7A 'z' */ {0x44,0x64,0x54,0x4C,0x44},
+/* 0x7B '{' */ {0x00,0x08,0x36,0x41,0x00},
+/* 0x7C '|' */ {0x00,0x00,0x7F,0x00,0x00},
+/* 0x7D '}' */ {0x00,0x41,0x36,0x08,0x00},
+/* 0x7E '~' */ {0x02,0x01,0x02,0x04,0x02},
+};
+
+static void draw_char(int x, int y, char ch, int scale){
+  if(ch < 0x20 || ch > 0x7E) ch = '?';
+  const uint8_t* col = font5x7[ch - 0x20];
+  for(int cx=0; cx<5; ++cx){
+    uint8_t bits = col[cx];
+    for(int cy=0; cy<7; ++cy){
+      int on = (bits >> cy) & 1;  /* bit0 が上段 */
+      if(on){
+        if(scale==1){
+          fb_setpix(x+cx, y+cy, 1);
+        }else{
+          for(int dx=0; dx<scale; ++dx)
+            for(int dy=0; dy<scale; ++dy)
+              fb_setpix(x+cx*scale+dx, y+cy*scale+dy, 1);
+        }
+      }
+    }
   }
 }
 
+static void draw_text(int x,int y,const char* s,int scale){
+  int adv = (5+1)*scale; /* 5列+空白1列 */
+  for(; *s; ++s){
+    if(*s=='\n'){ y += (7+1)*scale; x = 0; continue; }
+    draw_char(x,y,*s,scale);
+    x += adv;
+  }
+}
+
+/* ===== フレームバッファ→パネル転送＋更新 ===== */
+static void epd_upload_and_refresh(void){
+  /* 書き込みウィンドウ */
+  epd_cmd(0x44); epd_data(0x00); epd_data((EPD_W/8)-1);
+  epd_cmd(0x45); epd_data(0x00); epd_data(0x00);
+                  epd_data((EPD_H-1)&0xFF); epd_data((EPD_H-1)>>8);
+  epd_cmd(0x4E); epd_data(0x00);
+  epd_cmd(0x4F); epd_data(0x00); epd_data(0x00);
+
+  /* 黒面RAM(0x24)へ送る（白=1, 黒=0 そのまま） */
+  epd_cmd(0x24);
+  for(unsigned i=0;i<sizeof(fb);++i) epd_data(fb[i]);
+
+  /* フル更新 */
+  epd_cmd(0x22); epd_data(0xF7);
+  epd_cmd(0x20);
+  wait_busy();
+
+  /* 省電力（任意） */
+  epd_cmd(0x10); epd_data(0x01); /* deep sleep */
+}
+
 int main(void){
-  uart_init();
-  uart_puts("UART ready on Pi Zero 2.\n");
+  epd_init();
 
-  /* 1Hzタイマ（CNTPNS） */
-  uint64_t f = cntfrq();
-  reload = (uint32_t)(f/1);
-  cntp_disable();
-  cntp_tval(reload);
-  cntp_enable();
+  fb_clear(1); /* 全白 */
+  /* 好きな文字列をここへ（ASCII印字可能全対応） */
+  const char *msg =
+    "Hello, World!\n"
+    "ASCII: !\"#$%&'()*+,-./ 0123456789 :;<=>?\n"
+    "@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_\n"
+    "`abcdefghijklmnopqrstuvwxyz{|}~";
+  int scale=2;
+  int x = 8;
+  int y = (EPD_H - (7+1)*scale*3)/2; /* だいたい中央付近に3行分 */
 
-  /* CNTPNS を core0 IRQ にルーティング */
-  MMIO32(CORE0_TIMER_IRQCNTL) = QA7_IRQ_CNTPNS;
+  draw_text(x, y, msg, scale);
 
-  /* IRQ許可 */
-  enable_irq();
+  epd_upload_and_refresh();
 
   for(;;){ __asm__ volatile("wfi"); }
 }
-

@@ -1,8 +1,10 @@
-CROSS = aarch64-elf
-CC = $(CROSS)-gcc
-LD = $(CROSS)-ld
+CROSS   = aarch64-elf
+CC      = $(CROSS)-gcc
+LD      = $(CROSS)-ld
 OBJCOPY = $(CROSS)-objcopy
-CFLAGS = -O2 -ffreestanding -nostdlib -nostartfiles -Wall -Wextra -mgeneral-regs-only
+
+# Zero 2 W 向け。-mgeneral-regs-only で浮動小数点レジスタ未使用に。
+CFLAGS  = -O2 -ffreestanding -nostdlib -nostartfiles -Wall -Wextra -mgeneral-regs-only
 
 all: kernel8.img
 

@@ -1,0 +1,11 @@
+total 6528
+drwx------@ 1 ab25cq  staff        0 11月  5 02:32 .
+drwxr-xr-x  5 root    wheel      160 11月  5 02:32 ..
+drwx------  1 ab25cq  staff    32768 11月  5 02:32 .fseventsd
+drwx------  1 ab25cq  staff    32768 11月  4 21:41 .Spotlight-V100
+-rwx------  1 ab25cq  staff    33672 11月  5 02:16 bcm2710-rpi-zero-2-w.dtb
+-rwx------  1 ab25cq  staff       77 11月  5 02:24 config.txt
+-rwx------  1 ab25cq  staff     7365 10月  1 00:06 fixup.dat
+-rwx------  1 ab25cq  staff     2786 11月  5 02:29 kernel8.img
+drwx------  1 ab25cq  staff    32768 11月  5 02:29 overlays
+-rwx------  1 ab25cq  staff  3023264 11月  5 02:16 start.elf
