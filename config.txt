@@ -1,4 +1,7 @@
 arm_64bit=1
+kernel=kernel8.img
 enable_uart=1
-dtoverlay=disable-bt
+disable_splash=1
+boot_delay=0
+
 
